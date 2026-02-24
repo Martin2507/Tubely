@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"path"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -109,7 +110,22 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	fileName := hex.EncodeToString(randomByte)
 
-	keyValue := fmt.Sprintf("%s.mp4", fileName)
+	prefixString := "other"
+
+	prefix, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "No file with such a name exists", err)
+		return
+	}
+
+	if prefix == "16:9" {
+		prefixString = "landscape"
+	}
+	if prefix == "9:16" {
+		prefixString = "portrait"
+	}
+
+	keyValue := path.Join(prefixString, fileName+".mp4")
 
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      aws.String(cfg.s3Bucket),
