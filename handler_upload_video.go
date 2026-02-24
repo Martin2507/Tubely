@@ -127,24 +127,40 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if prefix == "16:9" {
+	switch prefix {
+
+	case "16:9":
 		prefixString = "landscape"
-	}
-	if prefix == "9:16" {
+
+	case "9:16":
 		prefixString = "portrait"
 	}
 
+	// Run ffmpeg to create a new MP4 file with "fast start" encoding (moov atom moved to the front).
+	processedPath, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to process vidoe for the start", err)
+		return
+	}
+
+	// Open the processed file so we can stream its bytes to S3.
+	processedFile, err := os.Open(processedPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to open processed file", err)
+		return
+	}
+
+	defer processedFile.Close()
+	defer os.Remove(processedPath)
+
 	// Construct the final S3 key using the prefix and random filename
 	keyValue := path.Join(prefixString, fileName+".mp4")
-
-	// Reset seek again before S3 upload
-	tempFile.Seek(0, io.SeekStart)
 
 	// Upload the video file to the S3 bucket
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      aws.String(cfg.s3Bucket),
 		Key:         aws.String(keyValue),
-		Body:        tempFile,
+		Body:        processedFile,
 		ContentType: aws.String(mediaType),
 	})
 

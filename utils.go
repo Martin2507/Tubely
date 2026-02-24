@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"os/exec"
 )
@@ -48,4 +49,20 @@ func getVideoAspectRatio(filePath string) (string, error) {
 	}
 
 	return "other", nil
+}
+
+func processVideoForFastStart(filePath string) (string, error) {
+
+	outputFile := filePath + ".processing"
+
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", "-movflags", "faststart", "-f", "mp4", outputFile)
+	var buffer bytes.Buffer
+	cmd.Stderr = &buffer
+
+	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("ffmpeg %s: %w", buffer.String(), err)
+	}
+
+	return outputFile, nil
 }
