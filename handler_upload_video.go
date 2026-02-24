@@ -19,12 +19,12 @@ import (
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
 
-	// Allocate 1 GB of space of memeory for the uploded video
+	// Limit the request body size to 1 GB to prevent memory exhaustion
 	const maxMemory = 1 << 30
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxMemory)
 
-	// Access the video ID from the URL and parse it as UUID
+	// Extract and validate the video ID from the URL path parameters
 	videoIDString := r.PathValue("videoID")
 
 	videoID, err := uuid.Parse(videoIDString)
@@ -33,26 +33,34 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Extract the Bearer Token from the Authorization header
+	// Authenticate the user by checking for a Bearer token in the headers
 	token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
 		respondWithError(w, http.StatusUnauthorized, "Couldn't find JWT", err)
 		return
 	}
 
-	// Validate the JWT and extract the userID
+	// Validate the JWT and retrieve the user's ID
 	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
 	if err != nil {
 		respondWithError(w, http.StatusUnauthorized, "Couldn't validate JWT", err)
 		return
 	}
 
+	// Fetch the video metadata from the database to ensure it exists
 	video, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		respondWithError(w, http.StatusUnauthorized, "Unauthorized access to vidoe", err)
 		return
 	}
 
+	// Ensure the user attempting the upload owns the video record
+	if video.UserID != userID {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized access to video", nil)
+		return
+	}
+
+	// Parse the multipart form to retrieve the uploaded video file
 	file, header, err := r.FormFile("video")
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Unable to parse from file", err)
@@ -61,14 +69,10 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	defer file.Close()
 
+	// Validate the Content-Type of the uploaded file
 	mediaType := header.Header.Get("Content-Type")
 	if mediaType == "" {
 		respondWithError(w, http.StatusBadRequest, "Missing Content-Type", errors.New("from file header missing Content-Type"))
-		return
-	}
-
-	if video.UserID != userID {
-		respondWithError(w, http.StatusUnauthorized, "Unauthorized access to video", nil)
 		return
 	}
 
@@ -83,6 +87,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Create a temporary file on disk to store the video for processing
 	tempFile, err := os.CreateTemp("", "tubely-upload.mp4")
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to create a temp file", err)
@@ -93,14 +98,17 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	defer tempFile.Close()
 
+	// Copy the uploaded file data into the temporary disk file
 	_, copyErr := io.Copy(tempFile, file)
 	if copyErr != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to copy video to a new file", copyErr)
 		return
 	}
 
+	// Reset the read pointer to the beginning of the file before processing/uploading
 	tempFile.Seek(0, io.SeekStart)
 
+	// Generate a random 32-byte hex string to use as the unique S3 filename
 	randomByte := make([]byte, 32)
 
 	if _, err := rand.Read(randomByte); err != nil {
@@ -110,6 +118,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	fileName := hex.EncodeToString(randomByte)
 
+	// Determine the aspect ratio to decide the S3 prefix (directory)
 	prefixString := "other"
 
 	prefix, err := getVideoAspectRatio(tempFile.Name())
@@ -125,8 +134,13 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		prefixString = "portrait"
 	}
 
+	// Construct the final S3 key using the prefix and random filename
 	keyValue := path.Join(prefixString, fileName+".mp4")
 
+	// Reset seek again before S3 upload
+	tempFile.Seek(0, io.SeekStart)
+
+	// Upload the video file to the S3 bucket
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      aws.String(cfg.s3Bucket),
 		Key:         aws.String(keyValue),
@@ -139,6 +153,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Update the database with the new S3 URL
 	newVideoUrl := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, keyValue)
 
 	video.VideoURL = &newVideoUrl
@@ -148,6 +163,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Return the updated video metadata to the client
 	respondWithJSON(w, http.StatusOK, video)
 
 }
